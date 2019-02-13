@@ -131,21 +131,33 @@ func TailLog(job *Job) error {
     return nil
 }
 
-func IsComplete(job *Job) (bool, error) {
+func IsComplete(job *Job) bool {
     command := []string{"kubectl", "get", "job", job.JobName, "-o", "jsonpath='{.status.conditions[?(@.type==\"Complete\")].status}'"}
     out, err := execKubectl(command, job.Logger)
     if err != nil {
         job.Logger.Error(err.Error())
-        return false, err
+        return false
     }
 
     status := strings.Trim(out, "'")
 
     if status == "True" {
-        return true, nil
+        return true
     }
 
-    return false, nil
+    return false
+}
+
+func Exists(job *Job) bool {
+    command := []string{"kubectl", "get", "job", "-l", fmt.Sprintf("job-name=%s", job.JobName), "-o", "jsonpath='{.items[*].metadata.name}'"}
+    out, _ := execKubectl(command, job.Logger)
+    jobName := strings.Trim(out, "'")
+
+    if len(jobName) > 0 {
+        return true
+    }
+
+    return false
 }
 
 func DeleteJob(job *Job) error {

@@ -1,103 +1,87 @@
 package main
 
 import (
-	"os"
-	"fmt"
-	"strconv"
-	"go.uber.org/zap"
-	"github.com/FiNCDeveloper/batchctl/libs/kube"
+    "os"
+    "os/signal"
+    "syscall"
+    "fmt"
+    "strconv"
+    "go.uber.org/zap"
+    "github.com/FiNCDeveloper/batchctl/libs/kube"
 )
 
 var logger *zap.Logger
 
 func getCommand() []string {
-	command := []string{}
-	argLen := len(os.Args)
-	if argLen >= 2 {
-		for _, c := range os.Args[1:] {
-			command = append(command, fmt.Sprintf("\"%s\"", c))
-		}
-	}
+    command := []string{}
+    argLen := len(os.Args)
+    if argLen >= 2 {
+        for _, c := range os.Args[1:] {
+            command = append(command, fmt.Sprintf("\"%s\"", c))
+        }
+    }
 
-	return command
-}
-
-func getCPUAndMemory() (int64 , int64) {
-	var cpu int64 = 2
-	var mem int64 = 128
-	var err error = nil
-
-	if cpu, err = strconv.ParseInt(os.Getenv("CPU_NUM"), 10, 64); err != nil {
-		logger.Info("Using the default number of vCPUs: 2")
-		cpu = 2
-	}
-
-	if mem, err = strconv.ParseInt(os.Getenv("MEMORY_MB"), 10, 64); err != nil {
-		logger.Info("Using the default number of MB of memory: 128MB")
-		mem = 128
-	}
-
-	return cpu, mem
+    return command
 }
 
 func main() {
-	logger, _ = zap.NewDevelopment()
+    logger, _ = zap.NewDevelopment()
 
-	command := getCommand()
-	if len(command) == 0 {
-		logger.Error("Batch command is not specified.")
-		os.Exit(1)
-	}
+    sigs := make(chan os.Signal, 1)
+    done := make(chan bool, 1)
+    signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 
-	retryCount := 60
-	var err error = nil
-	if len(os.Getenv("RETRY_COUNT")) > 0 {
-		retryCount, err = strconv.Atoi(os.Getenv("RETRY_COUNT"))
-		if err != nil {
-			logger.Error(err.Error())
-			os.Exit(1)
-		}
-	}
+    command := getCommand()
+    if len(command) == 0 {
+        logger.Error("Batch command is not specified.")
+        os.Exit(1)
+    }
 
-	job := &kube.Job {
-		ServiceName:    os.Getenv("SERVICE_NAME"),
-		JobName:        os.Getenv("JOB_NAME"),
-		RetryCount:     retryCount,
-		Command:        command,
-		Logger:         logger,
-	}
+    retryCount := 60
+    var err error = nil
+    if len(os.Getenv("RETRY_COUNT")) > 0 {
+        retryCount, err = strconv.Atoi(os.Getenv("RETRY_COUNT"))
+        if err != nil {
+            logger.Error(err.Error())
+            os.Exit(1)
+        }
+    }
 
-	err = kube.CreateJob(job)
-	if err != nil {
-		logger.Error(err.Error())
-		os.Exit(1)
-	}
+    job := &kube.Job {
+        ServiceName:    os.Getenv("SERVICE_NAME"),
+        JobName:        os.Getenv("JOB_NAME"),
+        RetryCount:     retryCount,
+        Command:        command,
+        Logger:         logger,
+    }
 
-	err = kube.TailLog(job)
-	if err != nil {
-		logger.Error(err.Error())
-		os.Exit(1)
-	}
+    go func(job *kube.Job) {
+        <-sigs
 
-	// Get job status
-	isComplete, err := kube.IsComplete(job)
-	if err != nil {
-		logger.Error(err.Error())
-		os.Exit(1)
-	}
+        if kube.Exists(job) {
+            logger.Info("Cleaning up")
+            kube.DeleteJob(job)
+        }
 
-	// Clean up
-	logger.Info("Cleaning...")
-	err = kube.DeleteJob(job)
-	if err != nil {
-		logger.Error(err.Error())
-		os.Exit(1)
-	}
+        done <- true
+    }(job)
 
-	if !isComplete {
-		logger.Error("The job cannot complete!")
-		os.Exit(1)
-	}
+    err = kube.CreateJob(job)
+    if err != nil {
+        logger.Error(err.Error())
+        os.Exit(1)
+    }
 
-	logger.Info("COMPLETE")
+    kube.TailLog(job)
+    isComplete := kube.IsComplete(job)
+
+    syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+    <-done
+
+    if !isComplete {
+        logger.Error("The job cannot complete!")
+        os.Exit(1)
+    }
+
+    logger.Info("COMPLETE")
 }
